@@ -1,0 +1,233 @@
+services:
+  bot:
+    build: .
+    container_name: bot-nazi-bot
+    command: ["python", "main.py", "--testnet"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./backups:/app/backups
+      - ./config.yaml:/app/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck_bot.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    labels:
+      - "autoheal=true"
+    networks:
+      - bot-nazi
+
+  dashboard:
+    build: .
+    container_name: bot-nazi-dashboard
+    command: ["streamlit", "run", "dashboard/app.py",
+              "--server.port=8501", "--server.address=0.0.0.0",
+              "--server.headless=true", "--server.runOnSave=false"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on:
+      - bot
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck_http.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "autoheal=true"
+    networks:
+      - bot-nazi
+
+  # Etapa 2 de la investigacion de Funding Carry (ver conversacion 22-28/08):
+  # solo lee datos publicos de Binance (funding rate + precio), simula la
+  # regla validada y registra el P&L hipotetico. NO usa API keys, NO coloca
+  # ordenes, NO toca la cuenta -- por eso no lleva env_file ni credenciales.
+  funding-carry-watch:
+    build: .
+    container_name: bot-nazi-funding-carry-watch
+    command: ["python", "scripts/funding_carry_paper_watch.py"]
+    restart: unless-stopped
+    environment:
+      - NTFY_TOPIC=${NTFY_TOPIC}
+      - ALERT_ENABLED=${ALERT_ENABLED}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck_funding_carry_watch.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "autoheal=true"
+    networks:
+      - bot-nazi
+
+  # Ejecutor EN VIVO de Funding Carry (Etapa 3, ver plan de implementacion
+  # "vast-kindling-kitten"). A diferencia de funding-carry-watch (solo
+  # lectura), este SI puede colocar ordenes reales -- por eso recibe
+  # credenciales explicitas. Encender ordenes reales requiere ademas
+  # FUNDING_CARRY_LIVE_CONFIRM=yes en .env (del servidor) Y este --live en
+  # el command -- dos pasos deliberados, no un solo flag. NO usar
+  # env_file: .env completo aca -- solo las credenciales que esta feature
+  # necesita, para minimizar el radio de exposicion si el contenedor se ve
+  # comprometido.
+  #
+  # ACTIVADO EN VIVO el 11/09/2026 (confirmacion explicita del usuario) --
+  # notional $20 (ver FUNDING_CARRY_NOTIONAL_USDT en .env), capital real
+  # verificado con funding_carry_preflight.py (Spot $23.01 / Futuros $15.53
+  # con colchon). Deliberadamente NO se activo tambien funding-carry-live-btc
+  # (mas abajo) -- el capital actual solo alcanza para UNA pata Spot de $20
+  # a la vez, no para ETH y BTC en simultaneo.
+  funding-carry-live:
+    build: .
+    container_name: bot-nazi-funding-carry-live
+    command: ["python", "scripts/funding_carry_live.py", "--live"]
+    restart: unless-stopped
+    environment:
+      - BINANCE_API_KEY_LIVE=${BINANCE_API_KEY_LIVE}
+      - BINANCE_API_SECRET_LIVE=${BINANCE_API_SECRET_LIVE}
+      - BINANCE_API_KEY_SPOT=${BINANCE_API_KEY_SPOT}
+      - BINANCE_API_SECRET_SPOT=${BINANCE_API_SECRET_SPOT}
+      - FUNDING_CARRY_LIVE_CONFIRM=${FUNDING_CARRY_LIVE_CONFIRM}
+      - FUNDING_CARRY_NOTIONAL_USDT=${FUNDING_CARRY_NOTIONAL_USDT:-25}
+      - NTFY_TOPIC=${NTFY_TOPIC}
+      - ALERT_ENABLED=${ALERT_ENABLED}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck_funding_carry_live.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "autoheal=true"
+    networks:
+      - bot-nazi
+
+  # BTCUSDT -- sumado 09/09/2026 tras confirmar que el edge de Funding Carry
+  # no es especifico de ETH (BTCUSDT valido incluso mejor: 8/8 ventanas OOS
+  # vs 7/8 de ETH, ver backtests/funding_carry_results_btcusdt.json). Mismo
+  # script que funding-carry-watch, solo cambia FUNDING_CARRY_SYMBOL -- eso
+  # basta porque scripts/funding_carry_paper_watch.py deriva el nombre de
+  # archivo de datos/log del simbolo automaticamente.
+  funding-carry-watch-btc:
+    build: .
+    container_name: bot-nazi-funding-carry-watch-btc
+    command: ["python", "scripts/funding_carry_paper_watch.py"]
+    restart: unless-stopped
+    environment:
+      - FUNDING_CARRY_SYMBOL=BTCUSDT
+      - NTFY_TOPIC=${NTFY_TOPIC}
+      - ALERT_ENABLED=${ALERT_ENABLED}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck_funding_carry_watch.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "autoheal=true"
+    networks:
+      - bot-nazi
+
+  # Contraparte "live" (dry-run) de funding-carry-watch-btc -- mismo patron
+  # que funding-carry-live pero para BTCUSDT.
+  funding-carry-live-btc:
+    build: .
+    container_name: bot-nazi-funding-carry-live-btc
+    command: ["python", "scripts/funding_carry_live.py"]
+    restart: unless-stopped
+    environment:
+      - FUNDING_CARRY_SYMBOL=BTCUSDT
+      - BINANCE_API_KEY_LIVE=${BINANCE_API_KEY_LIVE}
+      - BINANCE_API_SECRET_LIVE=${BINANCE_API_SECRET_LIVE}
+      - BINANCE_API_KEY_SPOT=${BINANCE_API_KEY_SPOT}
+      - BINANCE_API_SECRET_SPOT=${BINANCE_API_SECRET_SPOT}
+      - FUNDING_CARRY_LIVE_CONFIRM=${FUNDING_CARRY_LIVE_CONFIRM}
+      - FUNDING_CARRY_NOTIONAL_USDT=${FUNDING_CARRY_NOTIONAL_USDT:-25}
+      - NTFY_TOPIC=${NTFY_TOPIC}
+      - ALERT_ENABLED=${ALERT_ENABLED}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck_funding_carry_live.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "autoheal=true"
+    networks:
+      - bot-nazi
+
+  # Bot 2 -- tracker/diario de Copy Trading (ver conversacion 28-29/08).
+  # Recibe por webhook las notificaciones push reales de "Futures Order Filled"
+  # que reenvia una tablet Android (NotificationForwarder/MacroDroid) cuando el
+  # copy trading del usuario abre o cierra una posicion. Lleva la contabilidad
+  # hipotetica y manda reportes por ntfy. NO coloca ordenes, NO usa API keys de
+  # Binance -- por eso no lleva env_file ni credenciales.
+  bot2-copy-tracker:
+    build: .
+    container_name: bot-nazi-bot2-tracker
+    command: ["python", "scripts/bot2_copy_tracker.py"]
+    restart: unless-stopped
+    environment:
+      - BOT2_WEBHOOK_TOKEN=${BOT2_WEBHOOK_TOKEN}
+      - BOT2_DAILY_REPORT_HOUR=${BOT2_DAILY_REPORT_HOUR}
+      - NTFY_TOPIC=${NTFY_TOPIC}
+      - ALERT_ENABLED=${ALERT_ENABLED}
+    ports:
+      - "8502:8502"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck_bot2.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    labels:
+      - "autoheal=true"
+    networks:
+      - bot-nazi
+
+  # Reinicia contenedores marcados "unhealthy" por su propio HEALTHCHECK.
+  # Sin esto, Docker solo reinicia contenedores que se caen del todo
+  # (restart: unless-stopped) — un proceso colgado pero vivo (ej. bot sin
+  # heartbeat) queda "unhealthy" indefinidamente sin este sidecar.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: bot-nazi-autoheal
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=30
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - bot-nazi
+
+networks:
+  bot-nazi:
+    driver: bridge

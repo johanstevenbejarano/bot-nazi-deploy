@@ -6,12 +6,25 @@ Conecta con los endpoints principales.
 import hashlib
 import hmac
 import time
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
 import requests
 
 from src.observability.logger import main_logger
+
+
+def _fmt_decimal(value: float) -> str:
+    """Formatea un float como string decimal plano, sin notacion cientifica.
+
+    `urlencode` serializa floats muy chicos (< 1e-4) en notacion cientifica
+    (ej. 1e-05) -- Binance espera un numero decimal normal en la query
+    string, no ese formato. Con los notionales de hoy ($20-25) las qty
+    reales no bajan de ese umbral, pero es una trampa real para el futuro
+    si algun dia se opera con cantidades mas chicas (hallazgo de auditoria
+    del 12/09/2026, preventivo, sin incidente observado)."""
+    return format(Decimal(str(value)), "f")
 
 
 class BinanceRestClient:
@@ -314,7 +327,7 @@ class BinanceRestClient:
             "side": side,
             "positionSide": position_side,
             "type": order_type,
-            "quantity": quantity,
+            "quantity": _fmt_decimal(quantity),
         }
 
         # Binance rechaza reduceOnly=false en entradas; solo enviar cuando aplica.
@@ -333,7 +346,7 @@ class BinanceRestClient:
             params["timeInForce"] = time_in_force
         
         if price:
-            params["price"] = price
+            params["price"] = _fmt_decimal(price)
         if client_order_id:
             # "newClientOrderId" es el nombre real que exige la API de
             # Binance Futures (POST /fapi/v1/order) -- "clientOrderId" (sin
@@ -439,9 +452,16 @@ class BinanceRestClient:
         return self._request("GET", "/fapi/v1/premiumIndex", params)
     
     def get_funding_rate(self, symbol: str) -> Dict[str, Any]:
-        """Obtiene el funding rate actual."""
+        """Obtiene el funding rate actual (campo "lastFundingRate").
+
+        Antes pegaba a /fapi/v1/fundingRate, que es el endpoint de
+        HISTORIAL (devuelve una lista, no el rate actual) -- mismo tipo de
+        error de "el nombre suena bien pero no es el endpoint correcto" que
+        el bug de newClientOrderId. Sin call-sites hoy (verificado por
+        auditoria del 12/09/2026), corregido preventivamente antes de que
+        alguien lo use asumiendo que devuelve un dict con el rate actual."""
         params = {"symbol": symbol}
-        return self._request("GET", "/fapi/v1/fundingRate", params)
+        return self._request("GET", "/fapi/v1/premiumIndex", params)
     
     def get_funding_rate_history(
         self,

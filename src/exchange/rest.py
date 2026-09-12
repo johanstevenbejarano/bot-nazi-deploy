@@ -318,8 +318,15 @@ class BinanceRestClient:
         }
 
         # Binance rechaza reduceOnly=false en entradas; solo enviar cuando aplica.
+        # La API documenta este parametro como el STRING "true"/"false", no un
+        # bool -- mandar el bool de Python (`True`) se serializa via urlencode
+        # como el string "True" (con mayuscula), que no es lo que la API
+        # espera. Encontrado en auditoria del 12/09/2026, sin incidente
+        # observado aun, pero el radio de daño es alto: si Binance lo
+        # rechazara, el fallback de mas abajo reintenta SIN reduceOnly, lo
+        # que en un cierre puede invertir la posicion en vez de cerrarla.
         if reduce_only:
-            params["reduceOnly"] = True
+            params["reduceOnly"] = "true"
 
         # timeInForce aplica a tipos limit/stop-limit, no a MARKET.
         if str(order_type).upper() != "MARKET":

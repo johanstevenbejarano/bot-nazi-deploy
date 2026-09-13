@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
@@ -1516,6 +1517,52 @@ def _render_heartbeat_metric(heartbeat_age: Optional[float]) -> None:
     )
 
 
+@st.cache_data(ttl=10, show_spinner=False)
+def _fetch_live_funding_carry_prices(symbol: str) -> Dict[str, Optional[float]]:
+    """Precio spot y mark price de Futuros EN VIVO, vía endpoints públicos
+    de Binance (sin firma, sin API keys). El dashboard NO tiene las
+    credenciales reales a propósito (aislamiento de seguridad, ver
+    docker-compose.yml) -- esto evita necesitarlas para mostrar PnL
+    actualizado, en vez de depender de las columnas mark_price/pnl_usdt de
+    la tabla `positions`, que se escriben una sola vez al abrir y quedan
+    congeladas (0/None) mientras la posición sigue abierta. TTL de 10s,
+    igual que el auto-refresh global de la página."""
+    prices: Dict[str, Optional[float]] = {"spot": None, "perp": None}
+    try:
+        r = requests.get("https://api.binance.com/api/v3/avgPrice", params={"symbol": symbol}, timeout=5)
+        r.raise_for_status()
+        prices["spot"] = float(r.json()["price"])
+    except Exception:
+        pass
+    try:
+        r = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex", params={"symbol": symbol}, timeout=5)
+        r.raise_for_status()
+        prices["perp"] = float(r.json()["markPrice"])
+    except Exception:
+        pass
+    return prices
+
+
+def _with_live_pnl(positions_df: pd.DataFrame, live_prices: Dict[str, Optional[float]]) -> pd.DataFrame:
+    """Reemplaza mark_price/pnl_usdt/pnl_percent por valores calculados con
+    el precio en vivo, para las filas donde se pudo traer el precio."""
+    df = positions_df.copy()
+    for idx, row in df.iterrows():
+        is_perp = str(row.get("symbol", "")).endswith("-PERP")
+        mark = live_prices["perp"] if is_perp else live_prices["spot"]
+        entry = row.get("entry_price")
+        qty = row.get("quantity")
+        if mark is None or entry in (None, 0) or qty in (None, 0):
+            continue
+        entry = float(entry)
+        qty = float(qty)
+        sign = -1.0 if str(row.get("side", "")).upper() == "SHORT" else 1.0
+        df.at[idx, "mark_price"] = mark
+        df.at[idx, "pnl_usdt"] = (mark - entry) * qty * sign
+        df.at[idx, "pnl_percent"] = (mark - entry) / entry * 100.0 * sign
+    return df
+
+
 def page_funding_carry() -> None:
     st.title("Funding Carry")
     st.caption(
@@ -1620,7 +1667,13 @@ def page_funding_carry() -> None:
         st.divider()
         if positions:
             st.subheader("Posiciones abiertas (reales)")
-            st.dataframe(pd.DataFrame(positions), use_container_width=True, hide_index=True)
+            live_prices = _fetch_live_funding_carry_prices(symbol)
+            df_positions = _with_live_pnl(pd.DataFrame(positions), live_prices)
+            st.dataframe(df_positions, use_container_width=True, hide_index=True)
+            if live_prices["spot"] is None or live_prices["perp"] is None:
+                st.caption("⚠️ No se pudo traer el precio en vivo de alguna pata — mark_price/pnl mostrados pueden estar desactualizados.")
+            else:
+                st.caption(f"mark_price/pnl calculados con precio en vivo (spot=${live_prices['spot']:.2f}, perp=${live_prices['perp']:.2f}), no la foto congelada de la entrada.")
         else:
             st.caption("Sin posiciones reales abiertas.")
 

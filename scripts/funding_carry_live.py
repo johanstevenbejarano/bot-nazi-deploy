@@ -307,27 +307,30 @@ def open_carry_position(
     perp_filled = None
     perp_order = None
     for attempt in range(1, MAX_LEG_RETRIES + 1):
-        # Antes de CUALQUIER reintento (no en el primer intento), chequear
-        # el estado real del exchange -- incidente real del 12/09/2026: un
-        # bug de nombre de parametro (ya corregido) hacia que confirm_fill
-        # nunca detectara el fill aunque la orden SI se hubiera llenado, y
-        # el loop apilaba una orden real nueva en cada intento (llego a 3x
-        # el tamaño de posicion pretendido). Este chequeo es la red de
-        # seguridad para cualquier otro motivo futuro de falso negativo en
-        # confirm_fill (blip de red, -2013 transitorio, etc.) -- si el
-        # exchange ya muestra una posicion short real, se adopta esa en vez
-        # de colocar otra orden.
-        if attempt > 1:
-            real_amt = _real_perp_position_amt(futures_client)
-            if real_amt is not None and real_amt < 0:
-                logger.warning(
-                    "Ya existe una posicion perp SHORT real (qty=%.6f) antes del intento %d -- "
-                    "un intento anterior SI lleno, no se coloca otra orden.",
-                    abs(real_amt), attempt,
-                )
-                perp_filled = {"status": "FILLED", "executedQty": str(abs(real_amt))}
-                perp_qty = abs(real_amt)
-                break
+        # Chequear el estado real del exchange en CADA intento, incluido el
+        # primero -- incidente real del 12/09/2026: un bug de nombre de
+        # parametro (ya corregido) hacia que confirm_fill nunca detectara
+        # el fill aunque la orden SI se hubiera llenado, y el loop apilaba
+        # una orden real nueva en cada intento (llego a 3x el tamaño de
+        # posicion pretendido). Un segundo incidente el 13/09/2026 (posicion
+        # cerrada externamente, ej. a mano en Binance) confirmo que chequear
+        # solo desde el intento 2 no alcanza -- si el estado real YA esta
+        # resuelto desde antes del primer intento, hay que detectarlo ahi
+        # tambien, no recien despues de gastar un intento real contra el
+        # exchange. perp_order se construye con un ID sintetico (no None)
+        # para que el resto de la funcion (db.insert_order, etc.) no explote
+        # -- ese fue el bug real que crasheo el cierre manual del 13/09.
+        real_amt = _real_perp_position_amt(futures_client)
+        if real_amt is not None and real_amt < 0:
+            logger.warning(
+                "Ya existe una posicion perp SHORT real (qty=%.6f) antes del intento %d -- "
+                "un intento anterior (o algo externo) SI la abrio, no se coloca otra orden.",
+                abs(real_amt), attempt,
+            )
+            perp_filled = {"status": "FILLED", "executedQty": str(abs(real_amt))}
+            perp_order = {"client_order_id": generate_client_order_id("ADOPTED-PERP"), "order_id": "adopted"}
+            perp_qty = abs(real_amt)
+            break
         try:
             perp_order = perp_om.place_order(
                 side="SELL", position_side="SHORT", order_type="MARKET",
@@ -410,21 +413,26 @@ def close_carry_position(
     perp_filled = None
     perp_order = None
     for attempt in range(1, MAX_LEG_RETRIES + 1):
-        # Misma red de seguridad que en la entrada: antes de reintentar,
-        # confirmar contra el exchange real si la posicion ya se cerro (un
-        # intento anterior pudo haber llenado sin que confirm_fill lo
-        # detectara). Umbral pequeño (no exactamente 0) para tolerar polvo
-        # de redondeo de stepSize.
-        if attempt > 1:
-            real_amt = _real_perp_position_amt(futures_client)
-            if real_amt is not None and abs(real_amt) < abs(perp_qty) * 0.1:
-                logger.warning(
-                    "La posicion perp real ya esta cerrada/reducida (qty=%.6f) antes del intento %d -- "
-                    "un intento anterior SI lleno, no se coloca otra orden.",
-                    abs(real_amt), attempt,
-                )
-                perp_filled = {"status": "FILLED", "executedQty": str(perp_qty)}
-                break
+        # Misma red de seguridad que en la entrada, y por la misma razon
+        # extendida a TODOS los intentos (no solo desde el 2do): incidente
+        # real del 13/09/2026, la posicion ya estaba cerrada externamente
+        # (a mano en Binance) desde ANTES del primer intento -- chequear
+        # recien desde el intento 2 dejaba gastar un intento real contra
+        # una posicion que ya no existia (rechazo -2019 confuso). Umbral
+        # pequeño (no exactamente 0) para tolerar polvo de redondeo de
+        # stepSize. perp_order con ID sintetico (no None) -- ese fue el
+        # bug real que crasheo el cierre manual del 13/09 (db.insert_order
+        # explotaba con perp_order=None).
+        real_amt = _real_perp_position_amt(futures_client)
+        if real_amt is not None and abs(real_amt) < abs(perp_qty) * 0.1:
+            logger.warning(
+                "La posicion perp real ya esta cerrada/reducida (qty=%.6f) antes del intento %d -- "
+                "un intento anterior (o algo externo) SI la cerro, no se coloca otra orden.",
+                abs(real_amt), attempt,
+            )
+            perp_filled = {"status": "FILLED", "executedQty": str(perp_qty)}
+            perp_order = {"client_order_id": generate_client_order_id("ADOPTED-PERP-EXIT"), "order_id": "adopted"}
+            break
         try:
             perp_order = perp_om.place_order(
                 side="BUY", position_side="SHORT", order_type="MARKET",

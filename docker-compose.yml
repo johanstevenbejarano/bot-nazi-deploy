@@ -86,16 +86,17 @@ services:
   # necesita, para minimizar el radio de exposicion si el contenedor se ve
   # comprometido.
   #
-  # ACTIVADO EN VIVO el 11/09/2026 (confirmacion explicita del usuario) --
-  # notional $20 (ver FUNDING_CARRY_NOTIONAL_USDT en .env), capital real
-  # verificado con funding_carry_preflight.py (Spot $23.01 / Futuros $15.53
-  # con colchon). Deliberadamente NO se activo tambien funding-carry-live-btc
-  # (mas abajo) -- el capital actual solo alcanza para UNA pata Spot de $20
-  # a la vez, no para ETH y BTC en simultaneo.
+  # ACTIVADO EN VIVO el 11/09/2026, PAUSADO el 13/09/2026 -- el usuario
+  # necesito retirar los fondos de Binance por una urgencia personal. La
+  # posicion real que estaba abierta ya se confirmo cerrada en ambas patas
+  # (perp positionAmt=0, spot ETH=0) antes de pausar -- no quedo plata
+  # trabada. Vuelve a dry-run (sin --live) hasta que el usuario decida
+  # reingresar capital y confirme explicitamente reactivarlo, mismo
+  # patron de doble candado que la primera vez.
   funding-carry-live:
     build: .
     container_name: bot-nazi-funding-carry-live
-    command: ["python", "scripts/funding_carry_live.py", "--live"]
+    command: ["python", "scripts/funding_carry_live.py"]
     restart: unless-stopped
     environment:
       - BINANCE_API_KEY_LIVE=${BINANCE_API_KEY_LIVE}
